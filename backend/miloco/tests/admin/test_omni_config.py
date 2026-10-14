@@ -1100,3 +1100,60 @@ def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, rea
 
     # 熔断仍是 error
     assert get_omni_circuit_breaker().snapshot().state == "error"
+
+
+# ─── /omni-config/test-image(可选的图片输入能力探测) ───────────────────────
+
+
+def test_test_image_endpoint_passes_through_and_does_not_run_connectivity_probe(
+    client, monkeypatch
+):
+    calls: list[tuple] = []
+
+    async def _fake_image_probe(model, base_url, api_key, **_):
+        calls.append((model, base_url, api_key))
+        return {"status": "supported", "reason": "answer_correct", "latency_ms": 7}
+
+    async def _boom(*a, **k):
+        raise AssertionError("connectivity probe must not run for test-image")
+
+    monkeypatch.setattr(
+        "miloco.admin.router._probe_image.probe_image_input", _fake_image_probe
+    )
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _boom)
+    data = client.post(
+        "/api/admin/omni-config/test-image",
+        json={"model": "m1", "base_url": "https://x/v1", "api_key": "sk-xxx"},
+    ).json()["data"]
+    assert data == {"status": "supported", "reason": "answer_correct", "latency_ms": 7}
+    assert calls == [("m1", "https://x/v1", "sk-xxx")]
+
+
+def test_test_image_endpoint_no_key(client):
+    data = client.post(
+        "/api/admin/omni-config/test-image",
+        json={"model": "m1", "base_url": "https://x/v1"},
+    ).json()["data"]
+    assert data == {"status": "failed", "reason": "no_key"}
+
+
+def test_test_image_endpoint_unsupported_end_to_end(client, monkeypatch):
+    """真走 probe_image + 底层 httpx(MockTransport 注入点之外用 monkeypatch 替换 AsyncClient 工厂)。"""
+    import httpx
+    from miloco.perception.engine.omni import probe_image
+
+    real_client = httpx.AsyncClient
+
+    def _handler(request):
+        return httpx.Response(400, json={"error": {"message": "image_url not supported"}})
+
+    monkeypatch.setattr(
+        probe_image.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_handler)}),
+    )
+    data = client.post(
+        "/api/admin/omni-config/test-image",
+        json={"model": "m1", "base_url": "https://x/v1", "api_key": "sk-xxx"},
+    ).json()["data"]
+    assert data["status"] == "unsupported" and data["reason"] == "image_rejected"

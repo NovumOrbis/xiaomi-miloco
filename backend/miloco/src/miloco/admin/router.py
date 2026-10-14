@@ -30,6 +30,7 @@ from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
+from miloco.perception.engine.omni import probe_image as _probe_image
 from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
@@ -1320,6 +1321,38 @@ async def test_omni_config(
             cb = get_omni_circuit_breaker()
             if cb.snapshot().state != "ok":
                 await cb.reset_on_config_change()
+    return NormalResponse(code=0, message="ok", data=result)
+
+
+@router.post(
+    "/omni-config/test-image",
+    summary="测试 omni 模型是否真的接受图片输入（可选；发一张内置合成纯色小图 + 一个提问，会消耗极少量 token，仅用户显式触发，不写库、不影响熔断状态）",
+    response_model=NormalResponse,
+)
+async def test_omni_image_input(
+    body: OmniTestBody, current_user: str = Depends(verify_token)
+):
+    """图片输入能力探测:与 ``/omni-config/test`` 的连通性探测互补,不替代它。
+
+    发送一次含内置纯色 PNG 的请求(经 provider adapter 构造,各 provider 格式正确),
+    问主色并核对回答。返回 {status, reason, http_status?, latency_ms?},
+    status ∈ supported / unsupported / failed / inconclusive,不含 provider 原始响应文本。
+    只读探测:不清熔断、不写档案。"""
+    omni = get_settings().model.omni
+    model = (body.model or omni.model).strip()
+    base_url = (body.base_url or omni.base_url).strip()
+    api_key = _key_by_label(
+        (body.label or omni.label or "").strip(),
+        body.api_key,
+        base_url=base_url,
+    )
+    if not api_key:
+        return NormalResponse(
+            code=0,
+            message="ok",
+            data={"status": "failed", "reason": "no_key"},
+        )
+    result = await _probe_image.probe_image_input(model, base_url, api_key)
     return NormalResponse(code=0, message="ok", data=result)
 
 
