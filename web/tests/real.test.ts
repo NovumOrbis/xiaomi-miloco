@@ -23,6 +23,7 @@ import {
   realDeleteOmniConfig,
   realListOmniModels,
   realTestOmniConfig,
+  realTestOmniImageInput,
   realEventRefUrl,
   realEventCropMeta,
   realUpdateRuleQuery,
@@ -888,6 +889,40 @@ describe("omni 配置契约 — 多档案", () => {
     expect(res.ok).toBe(true);
     expect(res.status).toBe(200);
     expect(res.message).toBe("连接正常");
+  });
+
+  it("图片输入探测：POST /omni-config/test-image，解析 {status,reason,latency_ms}", async () => {
+    let seen: { url: string; body: unknown } | null = null;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen = { url: String(input), body: JSON.parse(String(init?.body)) };
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: { status: "unsupported", reason: "image_rejected", http_status: 400, latency_ms: 42 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const res = await realTestOmniImageInput({
+      label: "配置1",
+      model: "m1",
+      base_url: "https://p/v1",
+      api_key: "sk-x",
+    });
+    expect(res).toEqual({
+      status: "unsupported",
+      reason: "image_rejected",
+      http_status: 400,
+      latency_ms: 42,
+    });
+    expect(seen!.url).toContain("/api/admin/omni-config/test-image");
+    expect(seen!.body).toEqual({
+      label: "配置1",
+      model: "m1",
+      base_url: "https://p/v1",
+      api_key: "sk-x",
+    });
   });
 });
 

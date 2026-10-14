@@ -47,6 +47,7 @@ import type {
   OmniConfigUpdate,
   OmniHealth,
   OmniProfileRef,
+  OmniImageProbeResult,
   OmniTestResult,
   OmniModelsResult,
   UpgradeCheck,
@@ -569,6 +570,13 @@ export async function testOmniConfig(
   input: OmniConfigUpdate,
 ): Promise<OmniTestResult> {
   return impl.realTestOmniConfig(input);
+}
+
+// 可选:发一张内置小图验证模型是否真的接受图片输入(用户显式触发,会消耗极少量 token)。
+export async function testOmniImageInput(
+  input: OmniConfigUpdate,
+): Promise<OmniImageProbeResult> {
+  return impl.realTestOmniImageInput(input);
 }
 
 // 用户点「立即重试」触发一次 omni probe;跳过熔断剩余 backoff。
