@@ -1170,14 +1170,14 @@ def test_test_image_endpoint_unknown_label_is_not_saved(client, monkeypatch):
     data = client.post(
         "/api/admin/omni-config/test-image", json={"label": "未保存的配置"}
     ).json()["data"]
-    assert data == {"status": "failed", "reason": "not_saved"}
+    assert data == {"status": "failed", "reason": "not_saved", "challenges": 0}
     assert calls == []
 
 
 def test_test_image_endpoint_no_key(client, monkeypatch):
     calls = _capture_image_probe(monkeypatch)
     data = client.post("/api/admin/omni-config/test-image", json={}).json()["data"]
-    assert data == {"status": "failed", "reason": "no_key"}
+    assert data == {"status": "failed", "reason": "no_key", "challenges": 0}
     assert calls == []
 
 
@@ -1198,7 +1198,7 @@ def test_test_image_endpoint_profile_without_key_does_not_borrow_other_key(
     data = client.post(
         "/api/admin/omni-config/test-image", json={"label": "乙"}
     ).json()["data"]
-    assert data == {"status": "failed", "reason": "no_key"}
+    assert data == {"status": "failed", "reason": "no_key", "challenges": 0}
     assert calls == []
 
 

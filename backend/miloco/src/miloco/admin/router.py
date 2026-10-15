@@ -1368,7 +1368,7 @@ async def test_omni_image_input(
         return NormalResponse(
             code=0,
             message="ok",
-            data={"status": "failed", "reason": "not_saved"},
+            data={"status": "failed", "reason": "not_saved", "challenges": 0},
         )
     saved_label, model, base_url = target
     model = model.strip()
@@ -1378,7 +1378,7 @@ async def test_omni_image_input(
         return NormalResponse(
             code=0,
             message="ok",
-            data={"status": "failed", "reason": "no_key"},
+            data={"status": "failed", "reason": "no_key", "challenges": 0},
         )
     result = await _probe_image.probe_image_input(model, base_url, api_key)
     return NormalResponse(code=0, message="ok", data=result)

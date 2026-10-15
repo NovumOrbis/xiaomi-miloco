@@ -392,6 +392,8 @@ async def test_400_without_image_hint_is_inconclusive():
         (httpx.Response(403, text="nope"), "bad_key"),
         (httpx.Response(404, text="nope"), "not_found"),
         (httpx.Response(429, text="slow down"), "rate_limited"),
+        # 400/422 之外的 4xx(如 415)不进图片细分,与图片能力无关 → failed
+        (httpx.Response(415, json={"error": {"message": "unsupported media type: image"}}), "http_error"),
         (httpx.Response(500, text="boom"), "http_error"),
         (httpx.Response(503, text="boom"), "http_error"),
     ],
@@ -448,6 +450,24 @@ async def test_truncated_empty_answer_is_distinguished():
     )
     r = await _run(resp)
     assert r["status"] == "inconclusive" and r["reason"] == "answer_truncated"
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "reason"), [("length", "answer_truncated"), ("stop", "empty_answer")]
+)
+async def test_stream_finish_reason_is_kept_for_truncation(finish_reason, reason):
+    # Qwen 被 adapter 强制流式:空内容 + 末 chunk finish_reason=length 也要识别为截断
+    sse = (
+        'data: {"choices":[{"delta":{"content":""}}]}\n\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"%s"}]}\n\n'
+        "data: [DONE]\n\n" % finish_reason
+    )
+    r = await _run(
+        httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"}),
+        model="qwen3.5-omni-flash",
+    )
+    assert r["status"] == "inconclusive" and r["reason"] == reason
+    assert r["challenges"] == 1
 
 
 async def test_question_is_natural_and_does_not_list_candidates():

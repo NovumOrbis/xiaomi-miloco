@@ -854,7 +854,7 @@ export function UsageOmniConfig() {
                     <button
                       type="button"
                       onClick={onSave}
-                      disabled={saving || testing}
+                      disabled={saving || testing || imageTesting}
                       className="text-caption px-3 py-1.5 rounded-lg bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
                     >
                       {saving ? t("usage.saving") : t("usage.save")}
@@ -862,7 +862,7 @@ export function UsageOmniConfig() {
                     <button
                       type="button"
                       onClick={onTest}
-                      disabled={saving || testing}
+                      disabled={saving || testing || imageTesting}
                       className="text-caption px-3 py-1.5 rounded-lg bg-bg-secondary border border-border text-text-primary hover:border-brand-primary disabled:opacity-60"
                     >
                       {testing ? t("usage.testing") : t("usage.testConnection")}
@@ -884,7 +884,7 @@ export function UsageOmniConfig() {
                         setTestResult(null);
                         setImageResult(null);
                       }}
-                      disabled={saving || testing}
+                      disabled={saving || testing || imageTesting}
                       className="text-caption px-3 py-1.5 rounded-lg text-text-tertiary hover:text-text-primary"
                     >
                       {t("usage.cancel")}

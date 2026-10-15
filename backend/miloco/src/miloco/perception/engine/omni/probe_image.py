@@ -245,12 +245,18 @@ def _judge_answer(
     return _result("inconclusive", "wrong_answer", **kw)
 
 
-async def _read_stream_answer(adapter: Any, resp: httpx.Response) -> str | None:
-    """读 SSE 流并拼接增量文本（复用运行时 ``_iter_sse_chunks``）；
-    一条可解析 chunk 都没有则返回 None。"""
+async def _read_stream_answer(
+    adapter: Any, resp: httpx.Response
+) -> tuple[str | None, str | None]:
+    """读 SSE 流并拼接增量文本（复用运行时 ``_iter_sse_chunks``）。
+
+    返回 ``(text, finish_reason)``：一条可解析 chunk 都没有时 text 为 None；
+    finish_reason 取 OpenAI 形态 chunk 的 ``choices[0].finish_reason``（最后一个非空值），
+    让流式 provider（如 Qwen）也能区分 ``answer_truncated``。"""
     from miloco.perception.engine.omni.omni_client import _iter_sse_chunks
 
     parts: list[str] = []
+    finish_reason: str | None = None
     parsed_any = False
     async for chunk in _iter_sse_chunks(resp):
         if not isinstance(chunk, dict):
@@ -259,7 +265,12 @@ async def _read_stream_answer(adapter: Any, resp: httpx.Response) -> str | None:
         delta, _usage = adapter.parse_stream_chunk(chunk)
         if delta:
             parts.append(delta)
-    return "".join(parts) if parsed_any else None
+        choices = chunk.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            fr = choices[0].get("finish_reason")
+            if isinstance(fr, str) and fr:
+                finish_reason = fr
+    return ("".join(parts) if parsed_any else None), finish_reason
 
 
 def _challenge_colors(first: str | None) -> list[str]:
@@ -299,7 +310,7 @@ async def _run_challenge(
                     latency_ms = round((time.monotonic() - t0) * 1000)
                     return _classify_http_error(resp, raw, latency_ms)
                 if forced_stream:
-                    answer = await _read_stream_answer(adapter, resp)
+                    answer, finish_reason = await _read_stream_answer(adapter, resp)
                     latency_ms = round((time.monotonic() - t0) * 1000)
                     if answer is None:
                         return _result(
@@ -308,7 +319,7 @@ async def _run_challenge(
                             http_status=200,
                             latency_ms=latency_ms,
                         )
-                    return _judge_answer(answer, expected, latency_ms)
+                    return _judge_answer(answer, expected, latency_ms, finish_reason)
                 raw = await resp.aread()
     except Exception as e:  # noqa: BLE001 — 只回传分类码，不回传异常文本
         if isinstance(e, httpx.TimeoutException):
