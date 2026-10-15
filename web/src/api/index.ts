@@ -572,11 +572,10 @@ export async function testOmniConfig(
   return impl.realTestOmniConfig(input);
 }
 
-// 可选:发一张内置小图验证模型是否真的接受图片输入(用户显式触发,会消耗极少量 token)。
-export async function testOmniImageInput(
-  input: OmniConfigUpdate,
-): Promise<OmniImageProbeResult> {
-  return impl.realTestOmniImageInput(input);
+// 可选:发一张内置小图验证已保存的配置是否真的接受图片输入(用户显式触发,会消耗极少量 token)。
+// 只传 label(空 = 当前生效配置);model / base_url / key 由后端取自已保存配置。
+export async function testOmniImageInput(label: string): Promise<OmniImageProbeResult> {
+  return impl.realTestOmniImageInput({ label });
 }
 
 // 用户点「立即重试」触发一次 omni probe;跳过熔断剩余 backoff。

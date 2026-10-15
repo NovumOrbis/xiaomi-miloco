@@ -113,6 +113,8 @@
     "imgReasonUnreachable": "Couldn't reach the Base URL",
     "imgReasonInvalidUrl": "Invalid Base URL",
     "imgReasonNoKey": "No API key configured",
+    "imgReasonNotSaved": "This configuration is not saved yet",
+    "imgSaveFirst": "The image test runs against the saved configuration. Save your changes first.",
     "activateSuccess": "Enabled, takes effect next inference cycle",
     "activateFailed": "Couldn't enable",
     "deactivateSuccess": "Disabled, perception stopped",

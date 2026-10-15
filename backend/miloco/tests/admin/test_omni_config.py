@@ -1105,36 +1105,80 @@ def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, rea
 # ─── /omni-config/test-image(可选的图片输入能力探测) ───────────────────────
 
 
-def test_test_image_endpoint_passes_through_and_does_not_run_connectivity_probe(
-    client, monkeypatch
-):
+_SAVED = {"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k123456789"}
+
+
+def _save_profile(client):
+    client.put("/api/admin/omni-config", json=_SAVED)
+
+
+def _capture_image_probe(monkeypatch) -> list[tuple]:
     calls: list[tuple] = []
 
     async def _fake_image_probe(model, base_url, api_key, **_):
         calls.append((model, base_url, api_key))
         return {"status": "supported", "reason": "answer_correct", "latency_ms": 7}
 
-    async def _boom(*a, **k):
-        raise AssertionError("connectivity probe must not run for test-image")
-
     monkeypatch.setattr(
         "miloco.admin.router._probe_image.probe_image_input", _fake_image_probe
     )
+    return calls
+
+
+def test_test_image_endpoint_uses_saved_profile_and_not_connectivity_probe(
+    client, monkeypatch
+):
+    calls = _capture_image_probe(monkeypatch)
+
+    async def _boom(*a, **k):
+        raise AssertionError("connectivity probe must not run for test-image")
+
+    _save_profile(client)  # 保存本身会跑连通性探测;此后才禁止
     monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _boom)
     data = client.post(
-        "/api/admin/omni-config/test-image",
-        json={"model": "m1", "base_url": "https://x/v1", "api_key": "sk-xxx"},
+        "/api/admin/omni-config/test-image", json={"label": "甲"}
     ).json()["data"]
     assert data == {"status": "supported", "reason": "answer_correct", "latency_ms": 7}
-    assert calls == [("m1", "https://x/v1", "sk-xxx")]
+    assert calls == [("m1", "https://x/v1", "sk-k123456789")]
 
 
-def test_test_image_endpoint_no_key(client):
-    data = client.post(
+def test_test_image_endpoint_empty_label_uses_active_config(client, monkeypatch):
+    calls = _capture_image_probe(monkeypatch)
+    _save_profile(client)  # PUT 同时令其生效
+    client.post("/api/admin/omni-config/test-image", json={})
+    assert calls == [("m1", "https://x/v1", "sk-k123456789")]
+
+
+def test_test_image_endpoint_ignores_target_fields_in_body(client, monkeypatch):
+    """请求体不能把探测请求指向任意地址 / 模型 / key:一律取自已保存配置。"""
+    calls = _capture_image_probe(monkeypatch)
+    _save_profile(client)
+    client.post(
         "/api/admin/omni-config/test-image",
-        json={"model": "m1", "base_url": "https://x/v1"},
+        json={
+            "label": "甲",
+            "model": "other-model",
+            "base_url": "http://169.254.169.254/latest",
+            "api_key": "sk-attacker",
+        },
+    )
+    assert calls == [("m1", "https://x/v1", "sk-k123456789")]
+
+
+def test_test_image_endpoint_unknown_label_is_not_saved(client, monkeypatch):
+    calls = _capture_image_probe(monkeypatch)
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "未保存的配置"}
     ).json()["data"]
+    assert data == {"status": "failed", "reason": "not_saved"}
+    assert calls == []
+
+
+def test_test_image_endpoint_no_key(client, monkeypatch):
+    calls = _capture_image_probe(monkeypatch)
+    data = client.post("/api/admin/omni-config/test-image", json={}).json()["data"]
     assert data == {"status": "failed", "reason": "no_key"}
+    assert calls == []
 
 
 def test_test_image_endpoint_unsupported_end_to_end(client, monkeypatch):
@@ -1152,8 +1196,8 @@ def test_test_image_endpoint_unsupported_end_to_end(client, monkeypatch):
         "AsyncClient",
         lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_handler)}),
     )
+    _save_profile(client)
     data = client.post(
-        "/api/admin/omni-config/test-image",
-        json={"model": "m1", "base_url": "https://x/v1", "api_key": "sk-xxx"},
+        "/api/admin/omni-config/test-image", json={"label": "甲"}
     ).json()["data"]
     assert data["status"] == "unsupported" and data["reason"] == "image_rejected"

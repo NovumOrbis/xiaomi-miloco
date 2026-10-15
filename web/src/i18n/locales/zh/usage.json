@@ -113,6 +113,8 @@
     "imgReasonUnreachable": "无法连接 Base URL",
     "imgReasonInvalidUrl": "Base URL 不合法",
     "imgReasonNoKey": "未配置 API Key",
+    "imgReasonNotSaved": "该配置尚未保存",
+    "imgSaveFirst": "图片输入测试针对已保存的配置，请先保存当前修改",
     "activateSuccess": "已启用,下个推理周期生效",
     "activateFailed": "启用失败",
     "deactivateSuccess": "已停用,感知已停止",

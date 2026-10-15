@@ -904,12 +904,7 @@ describe("omni 配置契约 — 多档案", () => {
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as unknown as typeof fetch;
-    const res = await realTestOmniImageInput({
-      label: "配置1",
-      model: "m1",
-      base_url: "https://p/v1",
-      api_key: "sk-x",
-    });
+    const res = await realTestOmniImageInput({ label: "配置1" });
     expect(res).toEqual({
       status: "unsupported",
       reason: "image_rejected",
@@ -917,12 +912,8 @@ describe("omni 配置契约 — 多档案", () => {
       latency_ms: 42,
     });
     expect(seen!.url).toContain("/api/admin/omni-config/test-image");
-    expect(seen!.body).toEqual({
-      label: "配置1",
-      model: "m1",
-      base_url: "https://p/v1",
-      api_key: "sk-x",
-    });
+    // 只发 label:目标地址 / 模型 / key 由后端取自已保存配置
+    expect(seen!.body).toEqual({ label: "配置1" });
   });
 });
 

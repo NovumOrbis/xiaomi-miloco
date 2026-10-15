@@ -92,6 +92,7 @@ const IMG_REASON_KEY: Record<string, string> = {
   unreachable: "usage.imgReasonUnreachable",
   invalid_url: "usage.imgReasonInvalidUrl",
   no_key: "usage.imgReasonNoKey",
+  not_saved: "usage.imgReasonNotSaved",
 };
 const SEV_GLYPH: Record<Severity, string> = { ok: "✓", warn: "⚠", error: "✗" };
 const SEV_CLASS: Record<Severity, string> = {
@@ -410,7 +411,8 @@ export function UsageOmniConfig() {
     }
   }
 
-  // 可选:发一张内置合成小图验证模型是否真的接受图片输入。入参校验同 onTest;
+  // 可选:发一张内置合成小图验证**已保存**的配置是否真的接受图片输入。后端只按 label
+  // 取已存配置(不接受表单里未保存的地址/模型/key),故表单有未保存改动时先提示保存。
   // 与连通性测试互不影响(不改 testResult)。
   async function onTestImage() {
     const bu = baseUrl.trim();
@@ -420,19 +422,24 @@ export function UsageOmniConfig() {
       return;
     }
     const target = editing || existing?.label || undefined;
-    if (!apiKey.trim() && !editTarget(target)?.has_key) {
+    const saved = editTarget(target);
+    if (
+      !saved ||
+      apiKey.trim() ||
+      saved.model !== m ||
+      saved.base_url.replace(/\/+$/, "") !== bu.replace(/\/+$/, "")
+    ) {
+      toast(t("usage.imgSaveFirst"), "warn");
+      return;
+    }
+    if (!saved.has_key) {
       toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
       return;
     }
     setImageTesting(true);
     setImageResult(null);
     try {
-      const res = await testOmniImageInput({
-        label: target ?? "",
-        model: m,
-        base_url: bu,
-        api_key: apiKey.trim() || undefined,
-      });
+      const res = await testOmniImageInput(saved.label);
       setImageResult(res);
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.testFailed"), "danger");
