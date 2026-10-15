@@ -1331,13 +1331,19 @@ class OmniImageTestBody(BaseModel):
 
 
 def _saved_omni_target(label: str) -> tuple[str, str, str] | None:
-    """label → 已保存配置的 (model, base_url, api_key);空 label = 当前生效配置。"""
+    """label → 已保存配置的 (label, model, base_url);空 label = 当前生效配置。
+
+    刻意不返回 api_key:key 由调用方经 ``_key_by_label(..., base_url=...)`` 单独取,
+    沿用其「key 只能配合当初保存它的 URL 使用」的校验,也不让 key 与 model / base_url
+    混在同一个值里流向请求构造与日志。
+    """
     m = get_settings().model
-    if not label or label in (m.omni.label, _active_display_label()):
-        return m.omni.model, m.omni.base_url, m.omni.api_key
+    active_label = _active_display_label()
+    if not label or label in (m.omni.label, active_label):
+        return active_label, m.omni.model, m.omni.base_url
     for p in m.omni_profiles:
         if p.label == label:
-            return p.model, p.base_url, p.api_key
+            return p.label, p.model, p.base_url
     return None
 
 
@@ -1363,7 +1369,10 @@ async def test_omni_image_input(
             message="ok",
             data={"status": "failed", "reason": "not_saved"},
         )
-    model, base_url, api_key = (v.strip() for v in target)
+    saved_label, model, base_url = target
+    model = model.strip()
+    base_url = base_url.strip()
+    api_key = _key_by_label(saved_label, None, base_url=base_url)
     if not api_key:
         return NormalResponse(
             code=0,

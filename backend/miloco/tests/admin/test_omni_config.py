@@ -1181,6 +1181,84 @@ def test_test_image_endpoint_no_key(client, monkeypatch):
     assert calls == []
 
 
+def test_test_image_endpoint_profile_without_key_does_not_borrow_other_key(
+    client, monkeypatch
+):
+    """无 key 的档案不会借用当前生效配置(或其他档案)的 key:key 只随其所属 URL 使用。"""
+    calls = _capture_image_probe(monkeypatch)
+    _save_profile(client)  # 甲:有 key,且为当前生效
+    from miloco.config.settings import get_settings
+
+    s = get_settings()
+    s.model.omni_profiles.append(
+        s.model.omni_profiles[0].model_copy(
+            update={"label": "乙", "base_url": "https://other.example/v1", "api_key": ""}
+        )
+    )
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "乙"}
+    ).json()["data"]
+    assert data == {"status": "failed", "reason": "no_key"}
+    assert calls == []
+
+
+def test_test_image_endpoint_allows_lan_model_address(client, monkeypatch):
+    """自建 / 局域网模型(Ollama、vLLM 等)地址照常可测,不做私网拦截。"""
+    calls = _capture_image_probe(monkeypatch)
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "本地",
+            "model": "qwen2.5-vl",
+            "base_url": "http://10.0.0.5:11434/v1",
+            "api_key": "placeholder",
+        },
+    )
+    client.post("/api/admin/omni-config/test-image", json={"label": "本地"})
+    assert calls == [("qwen2.5-vl", "http://10.0.0.5:11434/v1", "placeholder")]
+
+
+def test_test_image_endpoint_never_logs_api_key(client, monkeypatch, caplog):
+    """走真实 probe_image + GeminiAdapter(非 flash 模型会打一条带 model 的 warning):
+    日志里可以有模型名,但绝不能出现 api_key。"""
+    import logging
+
+    import httpx
+    from miloco.perception.engine.omni import probe_image
+
+    secret = "sk-never-log-this-123456"
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "g",
+            "model": "gemini-2.5-pro",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": secret,
+        },
+    )
+    real_client = httpx.AsyncClient
+
+    def _handler(request):
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": "red"}]}}]}
+        )
+
+    monkeypatch.setattr(
+        probe_image.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_handler)}),
+    )
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "g"}
+    ).json()["data"]
+    assert data["status"] in {"supported", "inconclusive"}
+    assert "gemini-2.5-pro" in caplog.text  # 确实触发了带 model 的日志
+    assert secret not in caplog.text
+    assert secret not in str(data)
+
+
 def test_test_image_endpoint_unsupported_end_to_end(client, monkeypatch):
     """真走 probe_image + 底层 httpx(MockTransport 注入点之外用 monkeypatch 替换 AsyncClient 工厂)。"""
     import httpx
