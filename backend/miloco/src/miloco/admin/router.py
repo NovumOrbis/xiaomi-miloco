@@ -1349,7 +1349,7 @@ def _saved_omni_target(label: str) -> tuple[str, str, str] | None:
 
 @router.post(
     "/omni-config/test-image",
-    summary="测试已保存的 omni 配置是否真的接受图片输入（可选；发一张内置合成纯色小图 + 一个提问，会消耗极少量 token，仅用户显式触发，不写库、不影响熔断状态）",
+    summary="测试已保存的 omni 配置是否真的接受图片输入（可选；用最多两张内置合成纯色小图各问一次，最多 2 次模型请求、消耗极少量 token，仅用户显式触发，不写库、不影响熔断状态）",
     response_model=NormalResponse,
 )
 async def test_omni_image_input(
@@ -1358,8 +1358,9 @@ async def test_omni_image_input(
     """图片输入能力探测:与 ``/omni-config/test`` 的连通性探测互补,不替代它。
 
     只针对**已保存**的配置(按 label 选取,省略为当前生效配置):model / base_url / key
-    均取自配置,请求体不能指定地址。发送一次含内置纯色 JPEG 的请求(经 provider adapter
-    构造,各 provider 格式正确),问主色并核对回答。返回 {status, reason, http_status?,
+    均取自配置,请求体不能指定地址。最多两次独立挑战:两张不同颜色的内置纯色 JPEG
+    (经 provider adapter 构造,各 provider 格式正确)各问一次颜色并核对回答;第一张未识别
+    成功即停止,两张都答对才算支持。返回 {status, reason, challenges, http_status?,
     latency_ms?},status ∈ supported / unsupported / failed / inconclusive,不含 provider
     原始响应文本。只读探测:不清熔断、不写档案。"""
     target = _saved_omni_target((body.label or "").strip())

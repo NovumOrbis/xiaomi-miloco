@@ -453,7 +453,8 @@ export function UsageOmniConfig() {
     const reasonKey = IMG_REASON_KEY[res.reason];
     const reason = reasonKey ? t(reasonKey) : res.reason;
     const lat = res.latency_ms != null ? ` · ${res.latency_ms}ms` : "";
-    return `${SEV_GLYPH[IMG_STATUS_SEV[res.status] ?? "warn"]} ${t(IMG_STATUS_KEY[res.status] ?? "usage.imgInconclusive")}: ${reason}${lat}`;
+    const reqs = res.challenges ? ` · ${t("usage.imgRequests", { count: res.challenges })}` : "";
+    return `${SEV_GLYPH[IMG_STATUS_SEV[res.status] ?? "warn"]} ${t(IMG_STATUS_KEY[res.status] ?? "usage.imgInconclusive")}: ${reason}${lat}${reqs}`;
   }
 
   // 列表行内「测试」:对已存档的该条按 label 测(用存档 key,无需带 key),结果就地显示。

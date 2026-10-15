@@ -80,75 +80,183 @@ def test_probe_colours_survive_jpeg_and_stay_distinct(color):
             assert not _close(rgb, other_rgb)
 
 
-# ─── 请求格式:各 provider 的图片块 ──────────────────────────────────────────
+# ─── 模拟"看图模型":解码请求里真实发送的 JPEG,按其颜色作答 ───────────────────
+
+_ZH = {"red": "红", "green": "绿", "blue": "蓝", "yellow": "黄"}
 
 
-async def test_openai_compat_body_contains_image_url_block():
-    handler, seen = _capture(lambda: _chat_ok("red"))
+def _image_uri(body: dict) -> str:
+    if "contents" in body:  # Gemini 原生
+        parts = body["contents"][0]["parts"]
+        inline = next(p["inline_data"] for p in parts if "inline_data" in p)
+        assert inline["mime_type"] == "image/jpeg"
+        return "data:image/jpeg;base64," + inline["data"]
+    content = body["messages"][0]["content"]
+    imgs = [b for b in content if b["type"] == "image_url"]
+    assert len(imgs) == 1
+    return imgs[0]["image_url"]["url"]
+
+
+def _seen_colour(body: dict) -> str:
+    _, _, rgb = _decode_jpeg(_image_uri(body))
+    return min(
+        probe_image._COLORS,
+        key=lambda c: sum((a - b) ** 2 for a, b in zip(rgb, probe_image._COLORS[c])),
+    )
+
+
+def _vision(template: str = "{c}", *, fmt: str = "openai"):
+    """返回 (handler, seen):handler 看请求里的图作答,seen 记录每次请求与所见颜色。"""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        colour = _seen_colour(body)
+        seen.append({"url": str(request.url), "headers": dict(request.headers), "body": body, "colour": colour})
+        text = template.format(c=colour, C=colour.upper(), zh=_ZH[colour])
+        if fmt == "gemini":
+            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}}]})
+        if fmt == "sse":
+            half = len(text) // 2
+            sse = "".join(
+                'data: {"choices":[{"delta":{"content":%s}}]}\n\n' % json.dumps(part)
+                for part in (text[:half], text[half:])
+            ) + "data: [DONE]\n\n"
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+        return _chat_ok(text)
+
+    return handler, seen
+
+
+# ─── 请求格式:各 provider 的图片块(两次挑战) ──────────────────────────────
+
+
+async def test_openai_compat_two_challenges_with_distinct_images():
+    handler, seen = _vision()
     r = await probe_image.probe_image_input(
         "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
     )
     assert r["status"] == "supported" and r["reason"] == "answer_correct"
-    assert len(seen) == 1
-    req = seen[0]
-    assert req["url"] == f"{OPENAI_BASE}/chat/completions"
-    assert req["headers"]["authorization"] == f"Bearer {KEY}"
-    body = req["body"]
-    assert body["stream"] is False and body["max_tokens"] == probe_image._MAX_TOKENS
-    content = body["messages"][0]["content"]
-    img = next(b for b in content if b["type"] == "image_url")
-    w, h, rgb = _decode_jpeg(img["image_url"]["url"])
-    assert (w, h) == (96, 96) and _close(rgb, (220, 30, 30))
-    assert any(b["type"] == "text" and "colour" in b["text"] for b in content)
+    assert r["challenges"] == 2 and len(seen) == 2
+    assert seen[0]["colour"] == "red" and seen[1]["colour"] != "red"
+    for req in seen:
+        assert req["url"] == f"{OPENAI_BASE}/chat/completions"
+        assert req["headers"]["authorization"] == f"Bearer {KEY}"
+        body = req["body"]
+        assert body["stream"] is False and body["max_tokens"] == probe_image._MAX_TOKENS
+        w, h, _ = _decode_jpeg(_image_uri(body))
+        assert (w, h) == (96, 96)
+        assert any(b["type"] == "text" and "colour" in b["text"] for b in body["messages"][0]["content"])
 
 
-async def test_qwen_forced_stream_body_contains_image_and_reads_sse():
-    sse = (
-        'data: {"choices":[{"delta":{"content":"Bl"}}]}\n\n'
-        'data: {"choices":[{"delta":{"content":"ue"}}]}\n\n'
-        "data: [DONE]\n\n"
-    )
-    handler, seen = _capture(
-        lambda: httpx.Response(
-            200, content=sse, headers={"content-type": "text/event-stream"}
-        )
-    )
+async def test_qwen_forced_stream_two_challenges_read_sse():
+    handler, seen = _vision("{C}", fmt="sse")
     r = await probe_image.probe_image_input(
-        "qwen3.5-omni-flash",
-        OPENAI_BASE,
-        KEY,
-        color="blue",
-        transport=_transport(handler),
+        "qwen3.5-omni-flash", OPENAI_BASE, KEY, color="blue", transport=_transport(handler)
     )
-    assert r["status"] == "supported"
-    body = seen[0]["body"]
-    assert body["stream"] is True and body["modalities"] == ["text"]
-    img = next(b for b in body["messages"][0]["content"] if b["type"] == "image_url")
-    assert _close(_decode_jpeg(img["image_url"]["url"])[2], (30, 60, 220))
+    assert r["status"] == "supported" and r["challenges"] == 2
+    assert [s["colour"] for s in seen][0] == "blue" and len({s["colour"] for s in seen}) == 2
+    for req in seen:
+        assert req["body"]["stream"] is True and req["body"]["modalities"] == ["text"]
 
 
-async def test_gemini_native_body_contains_inline_data_image():
-    handler, seen = _capture(
-        lambda: httpx.Response(
-            200, json={"candidates": [{"content": {"parts": [{"text": "Green"}]}}]}
-        )
-    )
+async def test_gemini_native_two_challenges_inline_data():
+    handler, seen = _vision("{C}", fmt="gemini")
     r = await probe_image.probe_image_input(
-        "gemini-3-flash-preview",
-        GEMINI_BASE,
-        KEY,
-        color="green",
-        transport=_transport(handler),
+        "gemini-3-flash-preview", GEMINI_BASE, KEY, color="green", transport=_transport(handler)
     )
-    assert r["status"] == "supported"
-    req = seen[0]
-    assert req["url"] == f"{GEMINI_BASE}/models/gemini-3-flash-preview:generateContent"
-    assert req["headers"]["x-goog-api-key"] == KEY
-    parts = req["body"]["contents"][0]["parts"]
-    inline = next(p["inline_data"] for p in parts if "inline_data" in p)
-    assert inline["mime_type"] == "image/jpeg"
-    assert _close(_decode_jpeg("data:image/jpeg;base64," + inline["data"])[2], (30, 170, 60))
-    assert any("text" in p for p in parts)
+    assert r["status"] == "supported" and r["challenges"] == 2
+    for req in seen:
+        assert req["url"] == f"{GEMINI_BASE}/models/gemini-3-flash-preview:generateContent"
+        assert req["headers"]["x-goog-api-key"] == KEY
+        assert any("text" in p for p in req["body"]["contents"][0]["parts"])
+
+
+# ─── 双挑战调度:提前停止 / 请求次数 / 结果分类 ──────────────────────────────
+
+
+async def test_first_challenge_wrong_stops_after_one_request():
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        return _chat_ok("blue")
+
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
+    )
+    assert r["status"] == "inconclusive" and r["reason"] == "wrong_answer"
+    assert r["challenges"] == 1 and len(calls) == 1
+
+
+async def test_first_correct_second_wrong_is_inconclusive_after_two_requests():
+    answers = iter(["red", "red"])  # 第二张换了颜色,仍答 red = 盲答
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        return _chat_ok(next(answers))
+
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
+    )
+    assert r["status"] == "inconclusive" and r["reason"] == "wrong_answer"
+    assert r["challenges"] == 2 and len(calls) == 2
+
+
+async def test_second_challenge_rejecting_image_is_unsupported():
+    responses = iter(
+        [
+            None,  # 第一张:按图作答
+            httpx.Response(400, json={"error": {"message": "image input is not supported"}}),
+        ]
+    )
+    vision, _ = _vision()
+
+    def handler(request):
+        nxt = next(responses)
+        return vision(request) if nxt is None else nxt
+
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
+    )
+    assert r["status"] == "unsupported" and r["reason"] == "image_rejected"
+    assert r["challenges"] == 2
+
+
+async def test_network_failure_on_first_challenge_stops():
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ConnectError("boom")
+
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, transport=_transport(handler)
+    )
+    assert r["status"] == "failed" and r["reason"] == "unreachable"
+    assert r["challenges"] == 1 and len(calls) == 1
+
+
+@pytest.mark.parametrize("seed", range(20))
+async def test_random_challenges_use_two_distinct_colours(seed):
+    import random
+
+    random.seed(seed)
+    handler, seen = _vision()
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, transport=_transport(handler)
+    )
+    assert r["status"] == "supported" and len(seen) == 2
+    assert seen[0]["colour"] != seen[1]["colour"]
+
+
+async def test_supported_latency_is_sum_of_both_requests():
+    handler, seen = _vision()
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
+    )
+    assert r["status"] == "supported" and isinstance(r["latency_ms"], int) and r["latency_ms"] >= 0
 
 
 # ─── 状态映射 ────────────────────────────────────────────────────────────────
@@ -166,26 +274,45 @@ async def _run(response_or_exc, *, model="mimo-v2.6-flash", color="red"):
 
 
 @pytest.mark.parametrize(
-    "answer",
+    "template",
     [
-        "red",
-        "Red.",
-        "The dominant colour is RED.",
-        "a vibrant red color",
-        "This image is a solid crimson.",
-        "红色",
-        "这张图片是红色的",
+        "{c}",
+        "{C}.",
+        "The dominant colour is {C}.",
+        "a vibrant {c} color",
+        "{zh}色",
+        "这张图片是{zh}色的",
     ],
 )
-async def test_supported_answer_variants(answer):
-    r = await _run(_chat_ok(answer))
+async def test_supported_answer_variants(template):
+    handler, seen = _vision(template)
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, transport=_transport(handler)
+    )
     assert r["status"] == "supported" and r["http_status"] == 200
-    assert isinstance(r["latency_ms"], int)
+    assert r["challenges"] == 2 and len(seen) == 2
 
 
 async def test_supported_with_content_part_list():
-    r = await _run(_chat_ok([{"type": "text", "text": "red"}]))
-    assert r["status"] == "supported"
+    seen: list[str] = []
+
+    def handler(request):
+        colour = _seen_colour(json.loads(request.content))
+        seen.append(colour)
+        return _chat_ok([{"type": "text", "text": colour}])
+
+    r = await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, transport=_transport(handler)
+    )
+    assert r["status"] == "supported" and len(seen) == 2
+
+
+@pytest.mark.parametrize("answer", ["red", "crimson"])
+async def test_synonym_passes_first_challenge(answer):
+    # 固定回答:第一张(red)判对 → 才会发第二张;第二张换了颜色仍答同一个词 → inconclusive
+    r = await _run(_chat_ok(answer), color="red")
+    assert r["challenges"] == 2
+    assert r["status"] == "inconclusive" and r["reason"] == "wrong_answer"
 
 
 @pytest.mark.parametrize(
@@ -283,7 +410,7 @@ async def test_failed_timeout_and_unreachable():
 
 async def test_failed_invalid_scheme():
     r = await probe_image.probe_image_input("m", "ftp://x/v1", KEY)
-    assert r == {"status": "failed", "reason": "invalid_url"}
+    assert r == {"status": "failed", "reason": "invalid_url", "challenges": 0}  # 未发请求
 
 
 async def test_inconclusive_wrong_answer():
@@ -324,17 +451,19 @@ async def test_truncated_empty_answer_is_distinguished():
 
 
 async def test_question_is_natural_and_does_not_list_candidates():
-    handler, seen = _capture(lambda: _chat_ok("red"))
+    handler, seen = _vision()
     await probe_image.probe_image_input(
         "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
     )
-    body = seen[0]["body"]
-    text = " ".join(
-        b["text"] for b in body["messages"][0]["content"] if b["type"] == "text"
-    ).lower()
-    for colour in probe_image._COLORS:
-        assert colour not in text  # 不把候选颜色告诉模型
-    assert body["max_tokens"] >= 64
+    assert len(seen) == 2
+    for req in seen:  # 两次挑战都不把候选颜色告诉模型
+        body = req["body"]
+        text = " ".join(
+            b["text"] for b in body["messages"][0]["content"] if b["type"] == "text"
+        ).lower()
+        for colour in probe_image._COLORS:
+            assert colour not in text
+        assert body["max_tokens"] >= 64
 
 
 @pytest.mark.parametrize("content", ["", "   ", None])
@@ -368,4 +497,4 @@ async def test_result_never_echoes_response_text_or_key():
     r = await _run(httpx.Response(400, json={"error": {"message": secret_msg}}))
     dumped = json.dumps(r)
     assert KEY not in dumped and "leak-me" not in dumped
-    assert set(r) <= {"status", "reason", "http_status", "latency_ms"}
+    assert set(r) <= {"status", "reason", "http_status", "latency_ms", "challenges"}

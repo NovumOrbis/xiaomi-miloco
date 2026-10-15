@@ -565,6 +565,8 @@ export interface OmniImageProbeResult {
   reason: string;
   http_status?: number;
   latency_ms?: number;
+  /** 实际发出的探测请求数(0–2);第一张未识别成功即停止。 */
+  challenges?: number;
 }
 
 // ── 性能 tab（observability） ────────────────────────────────────

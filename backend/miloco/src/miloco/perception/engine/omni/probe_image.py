@@ -1,19 +1,21 @@
 """omni 图片输入能力探测（可选、需用户显式触发）。
 
 ``probe.probe_omni`` 只验证「地址可达 + 鉴权通过 + 模型名被接受」，**从不发图**：纯文本
-模型也会通过。本模块补上缺的一环——发一张内置的合成纯色小图并问「主色是什么」，据此判断
+模型也会通过。本模块补上缺的一环——用内置的合成纯色小图问「这是什么颜色」，据此判断
 当前配置的模型是否真的接受图片输入，而不是只看 HTTP 200。
 
 - 图片：代码内生成的纯色 JPEG（cv2 编码，与运行时视觉输入同格式；无任何真实画面），
   经 ``prompt_builder._jpeg_block`` 包装成与生产同形的 image_url 块。
 - 请求体：经 provider adapter 的 ``build_request_body`` 构造（OpenAI 兼容族 / Qwen 强制流式 /
   Gemini 原生 ``inline_data`` 各自拿到正确线上格式），鉴权头复用 ``build_request_headers``。
-- 单次请求（无 GET /models 预检），会消耗极少量 token，**不得被自动触发**（只由 admin
-  ``/omni-config/test-image`` 在用户点按钮时调用）。
+- 最多两次独立挑战（无 GET /models 预检）：两张不同颜色的图各问一次；第一张没有确认识别
+  成功就立即停止，只有两张都答对才算支持。最多两次模型调用、消耗极少量 token，不自动重试，
+  **不得被自动触发**（只由 admin ``/omni-config/test-image`` 在用户点按钮时调用）。
 
-返回 ``{status, reason, http_status?, latency_ms?}``，``status`` 四选一：
+返回 ``{status, reason, challenges, http_status?, latency_ms?}``（``challenges`` = 实际发出的
+请求数，``latency_ms`` = 各次请求耗时之和），``status`` 四选一：
 
-- ``supported``     —— 200 且回答正确（主色匹配）。
+- ``supported``     —— 两次挑战都 200 且回答正确（主色匹配）。
 - ``unsupported``   —— provider 以 400/422 + 图片/多模态相关报错明确拒绝了图片输入。
   若报错指向「这张图」本身（格式 / 尺寸 / 解码失败），说明模型其实收图，归 ``inconclusive``。
 - ``failed``        —— 鉴权 / 网络 / 超时 / 限流 / 5xx 等，**与图片能力无关**，无结论。
@@ -44,6 +46,7 @@ from miloco.perception.engine.omni.probe import _normalize_base_url
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # 自然短句回答约 5–15 token；留足余量，避免把被截断的回答误当成"不会看图"。
 _MAX_TOKENS = 64
+_CHALLENGES = 2
 _IMAGE_SIZE = 96
 _JPEG_QUALITY = 90
 
@@ -259,30 +262,23 @@ async def _read_stream_answer(adapter: Any, resp: httpx.Response) -> str | None:
     return "".join(parts) if parsed_any else None
 
 
-async def probe_image_input(
+def _challenge_colors(first: str | None) -> list[str]:
+    """两次挑战用的两种不同颜色（随机；``first`` 仅供测试固定第一张）。"""
+    names = list(_COLORS)
+    if first is None:
+        return random.sample(names, _CHALLENGES)
+    return [first, random.choice([c for c in names if c != first])]
+
+
+async def _run_challenge(
+    adapter: Any,
     model: str,
-    base_url: str,
-    api_key: str,
-    *,
-    color: str | None = None,
-    transport: httpx.AsyncBaseTransport | None = None,
+    base: str,
+    headers: dict[str, str],
+    expected: str,
+    transport: httpx.AsyncBaseTransport | None,
 ) -> dict[str, Any]:
-    """发一次内置纯色图 + 「主色是什么」，判断模型是否真的接受图片输入。
-
-    ``color`` / ``transport`` 仅供测试注入（固定答案 / MockTransport）。
-    """
-    base, err = _normalize_base_url(base_url)
-    if err is not None:
-        return _result("failed", "invalid_url")
-
-    # 延迟 import，与 probe.py 同款（避免顶层循环依赖）。
-    from miloco.perception.engine.omni.provider import (
-        build_request_headers,
-        get_adapter,
-    )
-
-    expected = color or random.choice(list(_COLORS))
-    adapter = get_adapter(model)
+    """发一张 ``expected`` 颜色的合成图并判定回答；单次请求，不重试。"""
     body = adapter.build_request_body(
         build_probe_messages(expected),
         model=model,
@@ -293,7 +289,6 @@ async def probe_image_input(
     )
     forced_stream = bool(body.get("stream", False))
     url = adapter.endpoint(base, model, stream=forced_stream)
-    headers = build_request_headers(adapter, base, api_key)
 
     t0 = time.monotonic()
     try:
@@ -336,3 +331,47 @@ async def probe_image_input(
         latency_ms,
         finish_reason if isinstance(finish_reason, str) else None,
     )
+
+
+async def probe_image_input(
+    model: str,
+    base_url: str,
+    api_key: str,
+    *,
+    color: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    """最多两次独立挑战，判断模型是否真的接受图片输入。
+
+    两张不同颜色的合成图各问一次「这是什么颜色」；第一张没有确认识别成功（任何非
+    ``supported`` 结果）就立即停止并返回该结果，不发第二次请求；两张都答对才返回
+    ``supported``。不自动重试。``color`` / ``transport`` 仅供测试注入（固定第一张颜色 /
+    MockTransport）。
+    """
+    base, err = _normalize_base_url(base_url)
+    if err is not None:
+        return {**_result("failed", "invalid_url"), "challenges": 0}
+
+    # 延迟 import，与 probe.py 同款（避免顶层循环依赖）。
+    from miloco.perception.engine.omni.provider import (
+        build_request_headers,
+        get_adapter,
+    )
+
+    adapter = get_adapter(model)
+    headers = build_request_headers(adapter, base, api_key)
+
+    total_latency_ms = 0
+    for attempt, expected in enumerate(_challenge_colors(color), start=1):
+        result = await _run_challenge(
+            adapter, model, base, headers, expected, transport
+        )
+        total_latency_ms += result.get("latency_ms") or 0
+        if result["status"] != "supported":
+            return {**result, "challenges": attempt}
+    return {
+        **_result(
+            "supported", "answer_correct", http_status=200, latency_ms=total_latency_ms
+        ),
+        "challenges": _CHALLENGES,
+    }
