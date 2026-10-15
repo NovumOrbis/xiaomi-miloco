@@ -42,7 +42,8 @@ from miloco.perception.engine.omni.probe import _normalize_base_url
 
 # 单次请求预算：比连通性探测宽松（图片推理略慢），connect 仍保持短。
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-_MAX_TOKENS = 32
+# 自然短句回答约 5–15 token；留足余量，避免把被截断的回答误当成"不会看图"。
+_MAX_TOKENS = 64
 _IMAGE_SIZE = 96
 _JPEG_QUALITY = 90
 
@@ -53,13 +54,33 @@ _COLORS: dict[str, tuple[int, int, int]] = {
     "blue": (30, 60, 220),
     "yellow": (240, 210, 20),
 }
-# 中文颜色字 → 英文名（模型无视「用英文作答」时的宽松兜底）。
-_ZH_COLORS = {"红": "red", "绿": "green", "蓝": "blue", "黄": "yellow"}
-
-_QUESTION = (
-    "What is the single dominant colour of this image? "
-    "Answer with exactly one lowercase English word: red, green, blue or yellow."
+# 回答里可识别的颜色词 → 归一名。候选四色之外的颜色也要识别：回答提到其他颜色
+# 视为"多色 / 看错"，不能只因为同时出现了期望颜色就判支持。
+_COLOR_WORDS: dict[str, str] = {
+    "red": "red", "crimson": "red", "scarlet": "red", "红": "red",
+    "green": "green", "绿": "green",
+    "blue": "blue", "navy": "blue", "蓝": "blue",
+    "yellow": "yellow", "gold": "yellow", "golden": "yellow", "黄": "yellow",
+    "orange": "orange", "橙": "orange", "橘": "orange",
+    "purple": "purple", "violet": "purple", "magenta": "purple", "紫": "purple",
+    "pink": "pink", "粉": "pink",
+    "brown": "brown", "棕": "brown", "褐": "brown",
+    "black": "black", "黑": "black",
+    "white": "white", "白": "white",
+    "gray": "gray", "grey": "gray", "灰": "gray",
+    "cyan": "cyan", "teal": "cyan", "青": "cyan",
+}
+# 否定 / 含糊 / 拒绝看图：出现即不下"支持"结论（如 "not red"、"maybe red"、"I can't see images"）。
+_HEDGE_WORDS = (
+    "not", "no", "isn't", "isnt", "never", "cannot", "can't", "cant", "unable",
+    "maybe", "perhaps", "probably", "possibly", "might", "unsure", "unclear",
+    "sorry", "guess",
 )
+_HEDGE_ZH = ("不", "没", "无法", "可能", "也许", "大概", "猜", "抱歉")
+
+# 自然、简短的提问；**不**列出候选颜色（避免泄露答案空间，也避免小模型在
+# "只许答一个词"的强约束下直接输出空串）。
+_QUESTION = "What colour is this image? Answer briefly."
 
 # 400/422 报错文本里出现这些词，视为「provider 明确不接受图片/多模态输入」。
 # 刻意只含通用词，不含任何厂商特定逻辑。
@@ -187,17 +208,36 @@ def _text_of(content: Any) -> str:
 
 
 def _colors_in(answer: str) -> set[str]:
-    found = {w for w in re.findall(r"[a-z]+", answer.lower()) if w in _COLORS}
-    found.update(en for zh, en in _ZH_COLORS.items() if zh in answer)
+    """回答中提到的全部颜色（归一名）。英文按整词匹配，中文按字匹配。"""
+    lowered = answer.lower()
+    found = {
+        _COLOR_WORDS[w] for w in re.findall(r"[a-z]+", lowered) if w in _COLOR_WORDS
+    }
+    found.update(v for k, v in _COLOR_WORDS.items() if not k.isascii() and k in answer)
     return found
 
 
-def _judge_answer(answer: str, expected: str, latency_ms: int) -> dict[str, Any]:
+def _is_hedged(answer: str) -> bool:
+    words = set(re.findall(r"[a-z']+", answer.lower()))
+    return bool(words & set(_HEDGE_WORDS)) or any(z in answer for z in _HEDGE_ZH)
+
+
+def _judge_answer(
+    answer: str, expected: str, latency_ms: int, finish_reason: str | None = None
+) -> dict[str, Any]:
+    """回答 → 结论。只有"恰好提到期望颜色这一种、且无否定/含糊"才算支持图片输入。
+
+    - 自然句（"a vibrant red color"、"红色"）可接受；
+    - 否定 / 含糊 / 多色 / 其他颜色 → ``inconclusive``（看图能力存疑 ≠ 不支持图片）；
+    - 空回答且 ``finish_reason == "length"`` → ``answer_truncated``（token 被耗尽，
+      常见于推理模型），与模型主动给空回答区分开。
+    """
     kw = {"http_status": 200, "latency_ms": latency_ms}
     if not answer.strip():
-        return _result("inconclusive", "empty_answer", **kw)
+        reason = "answer_truncated" if finish_reason == "length" else "empty_answer"
+        return _result("inconclusive", reason, **kw)
     mentioned = _colors_in(answer)
-    if mentioned == {expected}:
+    if mentioned == {expected} and not _is_hedged(answer):
         return _result("supported", "answer_correct", **kw)
     return _result("inconclusive", "wrong_answer", **kw)
 
@@ -283,17 +323,16 @@ async def probe_image_input(
     latency_ms = round((time.monotonic() - t0) * 1000)
     try:
         payload = adapter.parse_response(json.loads(raw))
-        content = (
-            payload["choices"][0]["message"]["content"]
-            if payload.get("choices")
-            else None
-        )
+        choice = payload["choices"][0] if payload.get("choices") else {}
+        content = choice.get("message", {}).get("content")
+        finish_reason = choice.get("finish_reason")
     except Exception:  # noqa: BLE001 — 非 JSON / 形状异常
         return _result(
             "inconclusive", "bad_response", http_status=200, latency_ms=latency_ms
         )
-    if content is None:
-        return _result(
-            "inconclusive", "empty_answer", http_status=200, latency_ms=latency_ms
-        )
-    return _judge_answer(_text_of(content), expected, latency_ms)
+    return _judge_answer(
+        _text_of(content) if content is not None else "",
+        expected,
+        latency_ms,
+        finish_reason if isinstance(finish_reason, str) else None,
+    )

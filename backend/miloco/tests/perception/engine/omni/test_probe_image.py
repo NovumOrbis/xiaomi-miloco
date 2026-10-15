@@ -166,7 +166,16 @@ async def _run(response_or_exc, *, model="mimo-v2.6-flash", color="red"):
 
 
 @pytest.mark.parametrize(
-    "answer", ["red", "Red.", "The dominant colour is RED.", "红色"]
+    "answer",
+    [
+        "red",
+        "Red.",
+        "The dominant colour is RED.",
+        "a vibrant red color",
+        "This image is a solid crimson.",
+        "红色",
+        "这张图片是红色的",
+    ],
 )
 async def test_supported_answer_variants(answer):
     r = await _run(_chat_ok(answer))
@@ -282,9 +291,50 @@ async def test_inconclusive_wrong_answer():
     assert r["status"] == "inconclusive" and r["reason"] == "wrong_answer"
 
 
-async def test_inconclusive_multiple_colours_named():
-    r = await _run(_chat_ok("red or blue"), color="red")
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "red or blue",
+        "red and white",
+        "orange-red",
+        "It is not red.",
+        "Not blue, it's red.",
+        "Maybe red?",
+        "Probably red",
+        "I can't see images, but I would guess red.",
+        "Sorry, I am unable to view images.",
+        "可能是红色",
+        "不是红色",
+    ],
+)
+async def test_inconclusive_negated_hedged_or_multi_colour(answer):
+    # 否定 / 含糊 / 多色 / 其他颜色:看图能力存疑,不判 supported,也不判 unsupported
+    r = await _run(_chat_ok(answer), color="red")
     assert r["status"] == "inconclusive" and r["reason"] == "wrong_answer"
+
+
+async def test_truncated_empty_answer_is_distinguished():
+    # 推理模型把 max_tokens 耗在思考上 → content 空 + finish_reason=length
+    resp = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]},
+    )
+    r = await _run(resp)
+    assert r["status"] == "inconclusive" and r["reason"] == "answer_truncated"
+
+
+async def test_question_is_natural_and_does_not_list_candidates():
+    handler, seen = _capture(lambda: _chat_ok("red"))
+    await probe_image.probe_image_input(
+        "mimo-v2.6-flash", OPENAI_BASE, KEY, color="red", transport=_transport(handler)
+    )
+    body = seen[0]["body"]
+    text = " ".join(
+        b["text"] for b in body["messages"][0]["content"] if b["type"] == "text"
+    ).lower()
+    for colour in probe_image._COLORS:
+        assert colour not in text  # 不把候选颜色告诉模型
+    assert body["max_tokens"] >= 64
 
 
 @pytest.mark.parametrize("content", ["", "   ", None])

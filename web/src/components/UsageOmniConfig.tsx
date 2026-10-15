@@ -82,6 +82,7 @@ const IMG_REASON_KEY: Record<string, string> = {
   image_invalid: "usage.imgReasonImageInvalid",
   wrong_answer: "usage.imgReasonWrongAnswer",
   empty_answer: "usage.imgReasonEmptyAnswer",
+  answer_truncated: "usage.imgReasonAnswerTruncated",
   bad_response: "usage.imgReasonBadResponse",
   rejected_unknown: "usage.imgReasonRejectedUnknown",
   bad_key: "usage.imgReasonBadKey",
