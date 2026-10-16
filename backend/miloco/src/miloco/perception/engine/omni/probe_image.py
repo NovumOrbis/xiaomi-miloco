@@ -13,7 +13,7 @@
   **不得被自动触发**（只由 admin ``/omni-config/test-image`` 在用户点按钮时调用）。
 
 返回 ``{status, reason, challenges, http_status?, latency_ms?}``（``challenges`` = 实际发出的
-请求数，``latency_ms`` = 各次请求耗时之和），``status`` 四选一：
+请求数，``latency_ms`` = 已完成请求的耗时之和；超时 / 断连等无耗时的结果不含该字段），``status`` 四选一：
 
 - ``supported``     —— 两次挑战都 200 且回答正确（主色匹配）。
 - ``unsupported``   —— provider 以 400/422 + 图片/多模态相关报错明确拒绝了图片输入。
@@ -328,10 +328,19 @@ async def _run_challenge(
 
     latency_ms = round((time.monotonic() - t0) * 1000)
     try:
-        payload = adapter.parse_response(json.loads(raw))
+        raw_payload = json.loads(raw)
+        payload = adapter.parse_response(raw_payload)
         choice = payload["choices"][0] if payload.get("choices") else {}
         content = choice.get("message", {}).get("content")
         finish_reason = choice.get("finish_reason")
+        if finish_reason is None and isinstance(raw_payload, dict):
+            # GeminiAdapter.parse_response 重建 choices 时不保留原生
+            # candidates[0].finishReason；把 MAX_TOKENS 映射回 "length"，让 Gemini 与
+            # OpenAI 兼容族 / Qwen 一样能区分 answer_truncated（不改运行时 parse_response）。
+            candidates = raw_payload.get("candidates") or []
+            first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+            if first.get("finishReason") == "MAX_TOKENS":
+                finish_reason = "length"
     except Exception:  # noqa: BLE001 — 非 JSON / 形状异常
         return _result(
             "inconclusive", "bad_response", http_status=200, latency_ms=latency_ms
@@ -379,6 +388,10 @@ async def probe_image_input(
         )
         total_latency_ms += result.get("latency_ms") or 0
         if result["status"] != "supported":
+            # 提前结束时也报累计耗时（与 challenges 口径一致）；超时等本就不带
+            # latency_ms 的结果保持缺席，不显示无意义的耗时。
+            if "latency_ms" in result:
+                result = {**result, "latency_ms": total_latency_ms}
             return {**result, "challenges": attempt}
     return {
         **_result(

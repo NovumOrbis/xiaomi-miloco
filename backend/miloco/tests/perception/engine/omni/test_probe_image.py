@@ -470,6 +470,53 @@ async def test_stream_finish_reason_is_kept_for_truncation(finish_reason, reason
     assert r["challenges"] == 1
 
 
+@pytest.mark.parametrize(
+    ("finish", "reason"), [("MAX_TOKENS", "answer_truncated"), ("STOP", "empty_answer")]
+)
+async def test_gemini_native_max_tokens_is_truncation(finish, reason):
+    # Gemini 非流式:可见文本为空 + 原生 finishReason=MAX_TOKENS → answer_truncated
+    resp = httpx.Response(
+        200,
+        json={"candidates": [{"content": {"parts": []}, "finishReason": finish}]},
+    )
+    r = await _run(resp, model="gemini-3-flash-preview")
+    assert r["status"] == "inconclusive" and r["reason"] == reason
+
+
+async def test_early_stop_reports_accumulated_latency(monkeypatch):
+    # 第一张答对、第二张被拒:latency_ms 是两次之和,而不是只有第二张
+    results = iter(
+        [
+            {"status": "supported", "reason": "answer_correct", "http_status": 200, "latency_ms": 1200},
+            {"status": "unsupported", "reason": "image_rejected", "http_status": 400, "latency_ms": 3400},
+        ]
+    )
+
+    async def fake_challenge(*a, **k):
+        return next(results)
+
+    monkeypatch.setattr(probe_image, "_run_challenge", fake_challenge)
+    r = await probe_image.probe_image_input("mimo-v2.6-flash", OPENAI_BASE, KEY)
+    assert r["status"] == "unsupported" and r["challenges"] == 2
+    assert r["latency_ms"] == 4600
+
+
+async def test_early_stop_without_latency_keeps_it_absent(monkeypatch):
+    results = iter(
+        [
+            {"status": "supported", "reason": "answer_correct", "http_status": 200, "latency_ms": 1200},
+            {"status": "failed", "reason": "timeout"},
+        ]
+    )
+
+    async def fake_challenge(*a, **k):
+        return next(results)
+
+    monkeypatch.setattr(probe_image, "_run_challenge", fake_challenge)
+    r = await probe_image.probe_image_input("mimo-v2.6-flash", OPENAI_BASE, KEY)
+    assert r == {"status": "failed", "reason": "timeout", "challenges": 2}
+
+
 async def test_question_is_natural_and_does_not_list_candidates():
     handler, seen = _vision()
     await probe_image.probe_image_input(
