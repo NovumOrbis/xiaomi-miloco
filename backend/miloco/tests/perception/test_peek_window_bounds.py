@@ -22,11 +22,16 @@ from types import SimpleNamespace
 import av
 import numpy as np
 import pytest
+from miloco.config.settings import PerceptionCollectSettings
 from miloco.perception.collect.camera_adapter import (
+    _CAMERA_TRACKS,
     CameraDeviceAdapter,
     _CameraDeviceState,
 )
-from miloco.perception.collect.stream_buffer import StreamFragment
+from miloco.perception.collect.stream_buffer import (
+    MultiTrackSyncBuffer,
+    StreamFragment,
+)
 from miloco.perception.engine.omni.prompt_builder import _encode_video_mp4
 from miloco.perception.engine.pipeline import (
     _downsample_for_omni,
@@ -39,7 +44,7 @@ from miloco.perception.engine.types import (
     IdentityPacket,
     MotionState,
 )
-from miloco.perception.schema import DecodedVideoFrame
+from miloco.perception.schema import DecodedAudioFrame, DecodedVideoFrame
 
 EPOCH_DELTA = 1_700_000_000_000
 COLLECT_MS = 4_000
@@ -63,7 +68,19 @@ def adapter(monkeypatch) -> CameraDeviceAdapter:
         ),
     )
     ad = CameraDeviceAdapter(miot_proxy=_Proxy())  # type: ignore[arg-type]
-    state = _CameraDeviceState(did="cam1")
+    # 与 connect_device 同参数建缓冲(生产口径:窗口几何 / 背压行为一致,测试结论才可迁移)
+    cfg = PerceptionCollectSettings()
+    assert cfg.window_size * 1000 == COLLECT_MS
+    state = _CameraDeviceState(
+        did="cam1",
+        sync_buffer=MultiTrackSyncBuffer(
+            track_names=_CAMERA_TRACKS,
+            window_ms=cfg.window_size * 1000,
+            max_windows=cfg.max_windows,
+            window_settle_ms=cfg.settle_ms,
+            buffer_full_action=cfg.full_action,
+        ),
+    )
     state.epoch_delta = EPOCH_DELTA
     ad._devices["cam1"] = state
     return ad
@@ -79,6 +96,18 @@ def _put_frames(adapter: CameraDeviceAdapter, walls: list[int]) -> None:
             unix_ms=wall + EPOCH_DELTA,
         )
         state.sync_buffer.put("decoded_video", frame, stream_ts=wall, wall_ms=wall)
+
+
+def _put_audio(adapter: CameraDeviceAdapter, walls: list[int]) -> None:
+    state = adapter._devices["cam1"]
+    for wall in walls:
+        frame = DecodedAudioFrame(
+            frame=np.zeros(160, dtype=np.int16),
+            stream_ts=wall,
+            wall_ms=wall,
+            unix_ms=wall + EPOCH_DELTA,
+        )
+        state.sync_buffer.put("decoded_audio", frame, stream_ts=wall, wall_ms=wall)
 
 
 def _identity_packet(frames: list[np.ndarray]) -> IdentityPacket:
@@ -206,3 +235,25 @@ class TestDownstreamFrameCountMatchesWindow:
         # 容器时长与实际跨度一致(编码粒度 = 1 / omni_fps)
         container_s = _container_duration_s(omni.all_frames, omni.frame_info.fps)
         assert abs(container_s - max(span_s, 1 / OMNI_FPS)) <= 1 / OMNI_FPS
+
+
+class TestMixedTrackEnvelope:
+    """音视频两轨都参与边界:窗口 = 跨轨道包络。钉住该语义,防止无声漂移。
+
+    连接爬坡期音频可能先于视频(视频要等首个关键帧)出帧,此时窗口会被音频前缀拉长、
+    超过视频实际跨度——属于修复前(时长恒为 0)就存在的残留;以视频轨锚定边界会丢掉
+    对查询有价值的音频上下文,属产品权衡,不在本修复范围。
+    """
+
+    def test_audio_head_start_stretches_window_beyond_video_span(self, adapter):
+        # 连接爬坡:音频 8.0s 起出帧,视频 11.0s 才出首帧,11.5s 查询
+        _put_audio(adapter, _walls(55, 8_000, 64))  # 8.0s ~ 11.46s
+        _put_frames(adapter, _walls(11, 11_000, 41.6))  # 11.0s ~ 11.42s
+
+        dd = adapter.collect("cam1", drain=False)
+
+        assert dd is not None and dd.video and dd.audio
+        walls = [f.wall_ms for f in dd.video] + [f.wall_ms for f in dd.audio]
+        video_span = max(f.wall_ms for f in dd.video) - min(f.wall_ms for f in dd.video)
+        assert (dd.window_start_ms, dd.window_end_ms) == (min(walls), max(walls))
+        assert dd.window_end_ms - dd.window_start_ms > video_span
